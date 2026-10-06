@@ -23,7 +23,10 @@ describe('exact translation keys', () => {
   function results(units: Unit[], next: string | null = null) {
     list.mockResolvedValue({
       data: { results: units, count: units.length, next },
-    } as any);
+      error: undefined,
+      request: new Request('https://example.com/api/units/'),
+      response: new Response(),
+    });
   }
 
   beforeEach(() => {
@@ -32,7 +35,12 @@ describe('exact translation keys', () => {
       getClient: () => ({}),
     } as WeblateClientService);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
-    update.mockResolvedValue({ data: body } as any);
+    update.mockResolvedValue({
+      data: body,
+      error: undefined,
+      request: new Request('https://example.com/api/units/42/'),
+      response: new Response(),
+    });
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -52,19 +60,23 @@ describe('exact translation keys', () => {
     );
   });
 
-  it.each([[title], [{ ...body, context: key.toUpperCase() }], [undefined]])(
-    'does not substitute a nonmatching unit (%j)',
-    async (unit) => {
-      results(unit ? [unit] : []);
-      await expect(
-        service.getTranslationByKey('soundscape', 'app', 'fr', key),
-      ).resolves.toBeNull();
-      await expect(
-        service.writeTranslation('soundscape', 'app', 'fr', key, 'New body'),
-      ).rejects.toThrow('Translation unit not found');
-      expect(update).not.toHaveBeenCalled();
+  it.each([
+    { name: 'longer key', units: [title] },
+    {
+      name: 'different case',
+      units: [{ ...body, context: key.toUpperCase() }],
     },
-  );
+    { name: 'missing key', units: [] },
+  ])('does not substitute a unit for a $name', async ({ units }) => {
+    results(units);
+    await expect(
+      service.getTranslationByKey('soundscape', 'app', 'fr', key),
+    ).resolves.toBeNull();
+    await expect(
+      service.writeTranslation('soundscape', 'app', 'fr', key, 'New body'),
+    ).rejects.toThrow('Translation unit not found');
+    expect(update).not.toHaveBeenCalled();
+  });
 
   it('writes the body unit without updating its title', async () => {
     results([title, body]);
@@ -78,11 +90,40 @@ describe('exact translation keys', () => {
     );
   });
 
+  it('isolates a missing key in a bulk write without updating another unit', async () => {
+    results([title, body]);
+    const result = await service.bulkWriteTranslations(
+      'soundscape',
+      'app',
+      'fr',
+      [
+        { key, value: 'New body' },
+        { key: 'missing', value: 'Missing body' },
+      ],
+    );
+    expect(result.summary).toEqual({ total: 2, successful: 1, failed: 1 });
+    expect(result.successful).toEqual([{ key, unit: body }]);
+    expect(result.failed).toEqual([
+      {
+        key: 'missing',
+        error: expect.stringContaining('Translation unit not found'),
+      },
+    ]);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ path: { id: '42' } }),
+    );
+  });
+
   it.each([
-    [[body, { ...body, id: 44 }], null],
-    [[body], 'https://example.com/api/units/?page=2'],
-  ])('refuses an ambiguous or incomplete lookup', async (units, next) => {
-    results(units as Unit[], next as string | null);
+    { name: 'duplicate keys', units: [body, { ...body, id: 44 }], next: null },
+    {
+      name: 'additional pages',
+      units: [body],
+      next: 'https://example.com/api/units/?page=2',
+    },
+  ])('refuses a write when the lookup has $name', async ({ units, next }) => {
+    results(units, next);
     await expect(
       service.writeTranslation('soundscape', 'app', 'fr', key, 'New body'),
     ).rejects.toThrow('Ambiguous translation key');
@@ -96,7 +137,7 @@ describe('exact translation keys', () => {
     expect(list).toHaveBeenCalledWith(
       expect.objectContaining({
         query: expect.objectContaining({
-          q: `context:=${JSON.stringify(specialKey)} project:soundscape component:app language:fr`,
+          q: 'context:="voice.\\"quoted\\"\\\\key" project:soundscape component:app language:fr',
         }),
       }),
     );
